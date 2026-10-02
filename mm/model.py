@@ -31,27 +31,35 @@ STEP_TYPES = {
     "key": ("버튼 누르기", [
         ("key", "버튼", "choice:BACK,HOME,APP_SWITCH,ENTER,VOLUME_UP,VOLUME_DOWN,POWER", "BACK")]),
     "text": ("글자 입력 (영문/숫자)", [("text", "내용", "str", "")]),
+    "end_round": ("이번 회차 끝 (다음 반복으로)", []),
+    "stop": ("완전 정지", []),
     "label": ("라벨 (이동 목적지)", [("name", "라벨 이름", "str", "시작")]),
     "goto": ("라벨로 이동 (반복)", [
         ("label", "이동할 라벨", "label", ""),
         ("times", "반복 횟수 (0 = 무한)", "int", 0)]),
-    "stop": ("매크로 종료", []),
 }
 
-# 스텝 추가 메뉴 그룹
+# 스텝 추가 메뉴 그룹 (일반 사용자는 위 네 개만으로 충분하도록)
 STEP_GROUPS = [
-    ("이미지", ["tap_image", "wait_image", "wait_gone", "if_image"]),
+    ("이미지", ["tap_image", "wait_image", "wait_gone"]),
     ("터치", ["tap", "long_press", "swipe"]),
     ("기타", ["wait", "key", "text"]),
-    ("흐름", ["label", "goto", "stop"]),
+    ("끝내기", ["end_round", "stop"]),
+    ("고급: 분기·반복", ["if_image", "label", "goto"]),
 ]
 
+# 이동 목적지 예약어 (라벨 이름으로 쓸 수 없음)
+RESERVED_TARGETS = ("stop", "end", "next")
+
 DEFAULT_SETTINGS = {
+    "loops": 1,          # 전체 반복 횟수 (0 = 무한)
     "step_delay": 300,   # 스텝 사이 기본 대기 (ms)
     "delay_jitter": 200,  # 스텝 대기에 더해질 랜덤 (ms)
     "tap_jitter": 4,     # 탭 좌표 랜덤 흔들림 (px)
     "poll": 0.4,         # 이미지 재확인 간격 (초)
 }
+
+QUALITY_TEXT = {"good": "좋음", "warn": "주의", "bad": "나쁨"}
 
 
 def new_step(step_type):
@@ -62,15 +70,15 @@ def new_step(step_type):
 
 
 def fail_text(v):
-    return {"stop": "정지", "next": "다음"}.get(v, "→" + v)
+    return {"stop": "정지", "end": "회차끝", "next": "다음", "": "다음"}.get(v, "→" + v)
 
 
 def describe(step):
     t = step["type"]
     s = step
-    title = STEP_TYPES[t][0]
     if t == "tap_image":
-        return f"[{s['template']}] 찾아서 탭  (≥{s['threshold']:.2f}, {s['timeout']:g}초, 실패:{fail_text(s['on_fail'])})"
+        off = f" 보정({s['offset_x']},{s['offset_y']})" if s["offset_x"] or s["offset_y"] else ""
+        return f"[{s['template']}] 찾아서 탭{off}  (≥{s['threshold']:.2f}, {s['timeout']:g}초, 실패:{fail_text(s['on_fail'])})"
     if t == "wait_image":
         return f"[{s['template']}] 나타날 때까지  ({s['timeout']:g}초, 실패:{fail_text(s['on_fail'])})"
     if t == "wait_gone":
@@ -94,7 +102,11 @@ def describe(step):
     if t == "goto":
         times = "무한" if not s["times"] else f"{s['times']}회"
         return f"↺ {s['label']} 로 이동 ({times})"
-    return title
+    if t == "end_round":
+        return "⏭ 이번 회차 끝"
+    if t == "stop":
+        return "⏹ 완전 정지"
+    return STEP_TYPES[t][0]
 
 
 class Macro:
@@ -104,6 +116,7 @@ class Macro:
         self.resolution = None  # [w, h] 매크로를 만든 기기 해상도
         self.settings = dict(DEFAULT_SETTINGS)
         self.steps = []
+        self.tmpl_info = {}  # 템플릿 이름 → {"level": good|warn|bad, "msg": ...}
 
     @property
     def template_dir(self):
@@ -119,7 +132,15 @@ class Macro:
     def template_names(self):
         if not os.path.isdir(self.template_dir):
             return []
-        return sorted(f[:-4] for f in os.listdir(self.template_dir) if f.lower().endswith(".png"))
+        names = [f[:-4] for f in os.listdir(self.template_dir) if f.lower().endswith(".png")]
+        return sorted(names, key=_natural_key)
+
+    def next_template_name(self, prefix="이미지"):
+        used = set(self.template_names())
+        n = 1
+        while f"{prefix}{n}" in used:
+            n += 1
+        return f"{prefix}{n}"
 
     def labels(self):
         return [s["name"] for s in self.steps if s["type"] == "label"]
@@ -138,6 +159,7 @@ class Macro:
             data = json.load(f)
         m.resolution = data.get("resolution")
         m.settings.update(data.get("settings", {}))
+        m.tmpl_info = data.get("templates", {})
         # 버전이 달라 빠진 필드는 기본값으로 채운다
         for s in data.get("steps", []):
             if s.get("type") in STEP_TYPES:
@@ -148,7 +170,15 @@ class Macro:
         return m
 
     def save(self):
-        data = {"name": self.name, "version": 1, "resolution": self.resolution,
-                "settings": self.settings, "steps": self.steps}
+        names = set(self.template_names())
+        self.tmpl_info = {k: v for k, v in self.tmpl_info.items() if k in names}
+        data = {"name": self.name, "version": 2, "resolution": self.resolution,
+                "settings": self.settings, "templates": self.tmpl_info, "steps": self.steps}
         with open(self.json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _natural_key(s):
+    """이미지2 < 이미지10 이 되도록 숫자를 숫자로 비교."""
+    import re
+    return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", s)]

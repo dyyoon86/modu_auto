@@ -13,7 +13,18 @@ class _Stopped(Exception):
 
 
 class _Finish(Exception):
-    pass
+    """이번 회차만 끝내고 다음 회차로."""
+
+
+class _Halt(Exception):
+    """매크로 전체를 정지."""
+
+
+def _hint(step):
+    """녹화/등록할 때 저장한 이미지 중심 위치 (없으면 None)."""
+    if "hint_x" in step and "hint_y" in step:
+        return step["hint_x"], step["hint_y"]
+    return None
 
 
 class Runner(QObject):
@@ -56,15 +67,19 @@ class Runner(QObject):
         j = int(self.cfg.get("tap_jitter", 0))
         return (x * self.sx + random.randint(-j, j), y * self.sy + random.randint(-j, j))
 
-    def _search(self, name, threshold, timeout, want_present=True):
-        """timeout 동안 이미지를 찾는다. want_present=False면 사라질 때까지."""
+    def _search(self, name, threshold, timeout, want_present=True, hint=None):
+        """timeout 동안 이미지를 찾는다. want_present=False면 사라질 때까지.
+
+        hint: 녹화 당시 위치(매크로 해상도 좌표). 똑같은 게 여러 개면 여기서 가장 가까운 것.
+        """
         tmpl = self.templates.get(name)
         if tmpl is None:
             raise RuntimeError(f"템플릿 '{name}' 이(가) 없습니다")
+        near = (hint[0] * self.sx, hint[1] * self.sy) if hint else None
         deadline = time.time() + timeout
         while True:
             screen = self.adb.screencap()
-            score, box = vision.find(screen, tmpl, self.sx)
+            score, box = vision.find(screen, tmpl, self.sx, near, threshold)
             found = score >= threshold
             self.frame.emit(screen, box if found else None)
             if found == want_present:
@@ -77,6 +92,8 @@ class Runner(QObject):
         if target in ("", "next"):
             return i + 1
         if target == "stop":
+            raise _Halt(f"#{i + 1} 실패 시 정지")
+        if target == "end":
             raise _Finish()
         if target not in self.label_idx:
             raise RuntimeError(f"라벨 '{target}' 이(가) 없습니다")
@@ -93,8 +110,10 @@ class Runner(QObject):
                 try:
                     self._run_once()
                 except _Finish:
-                    self.log.emit("종료 스텝 도달")
+                    self.log.emit("이번 회차 끝")
             self.finished.emit("완료")
+        except _Halt as e:
+            self.finished.emit(f"정지 ({e})")
         except _Stopped:
             self.finished.emit("사용자가 중지함")
         except Exception as e:  # 기기 끊김 등
@@ -136,7 +155,7 @@ class Runner(QObject):
         t = s["type"]
         if t in ("tap_image", "wait_image", "wait_gone"):
             present = t != "wait_gone"
-            box, score = self._search(s["template"], s["threshold"], s["timeout"], present)
+            box, score = self._search(s["template"], s["threshold"], s["timeout"], present, _hint(s))
             if present and box is None:
                 self.log.emit(f"#{i + 1} [{s['template']}] 못 찾음 (최고 {score:.2f})")
                 return self._jump(s["on_fail"], i)
@@ -152,7 +171,7 @@ class Runner(QObject):
                 self.log.emit(f"#{i + 1} [{s['template']}] 탭 ({cx:.0f},{cy:.0f}) 일치도 {score:.2f}")
             return i + 1
         if t == "if_image":
-            box, score = self._search(s["template"], s["threshold"], 0)
+            box, score = self._search(s["template"], s["threshold"], 0, hint=_hint(s))
             hit = box is not None
             self.log.emit(f"#{i + 1} [{s['template']}] {'있음' if hit else '없음'} ({score:.2f})")
             return self._jump(s["then"] if hit else s["else"], i)
@@ -179,6 +198,8 @@ class Runner(QObject):
                 return i + 1
             goto_count[i] = n
             return self._jump(s["label"], i)
-        elif t == "stop":
+        elif t == "end_round":
             raise _Finish()
+        elif t == "stop":
+            raise _Halt(f"#{i + 1} 완전 정지 스텝")
         return i + 1

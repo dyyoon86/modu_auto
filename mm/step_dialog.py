@@ -68,7 +68,8 @@ class StepDialog(QDialog):
         if kind == "label":
             return self._combo([("(다음 스텝)", "")] + [(l, l) for l in labels], value, editable=True)
         if kind == "fail":
-            items = [("정지", "stop"), ("다음 스텝으로", "next")] + [("라벨 → " + l, l) for l in labels]
+            items = [("완전 정지", "stop"), ("이번 회차 끝 (다음 반복으로)", "end"),
+                     ("무시하고 다음 스텝", "next")] + [("라벨 → " + l, l) for l in labels]
             return self._combo(items, value)
         if kind.startswith("choice:"):
             return self._combo([(c, c) for c in kind[7:].split(",")], value)

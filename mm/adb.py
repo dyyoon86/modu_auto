@@ -47,7 +47,19 @@ class Adb:
         return result
 
     def connect(self, addr):
-        return self._run("connect", addr, use_serial=False).decode("utf-8", "replace").strip()
+        out = self._run("connect", addr, use_serial=False, timeout=8).decode("utf-8", "replace").strip()
+        if "connected" not in out:  # adb는 실패해도 종료코드 0을 주는 경우가 있다
+            raise RuntimeError(out or "연결 실패")
+        return out
+
+    def pair(self, addr, code):
+        """안드로이드 11+ 무선 디버깅 페어링."""
+        return self._run("pair", addr, code, use_serial=False, timeout=20).decode("utf-8", "replace").strip()
+
+    def model(self, serial):
+        out = subprocess.run([self.path, "-s", serial, "shell", "getprop", "ro.product.model"],
+                             capture_output=True, timeout=5, creationflags=NO_WINDOW)
+        return out.stdout.decode("utf-8", "replace").strip()
 
     def screencap(self):
         data = self._run("exec-out", "screencap", "-p", timeout=20)
